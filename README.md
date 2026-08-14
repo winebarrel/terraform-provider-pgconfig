@@ -3,6 +3,7 @@
 [![CI](https://github.com/winebarrel/terraform-provider-pgconfig/actions/workflows/ci.yml/badge.svg)](https://github.com/winebarrel/terraform-provider-pgconfig/actions/workflows/ci.yml)
 [![terraform docs](https://img.shields.io/badge/terraform-docs-%35835CC?logo=terraform)](https://registry.terraform.io/providers/winebarrel/pgconfig/latest/docs)
 [![codecov](https://codecov.io/gh/winebarrel/terraform-provider-pgconfig/graph/badge.svg)](https://codecov.io/gh/winebarrel/terraform-provider-pgconfig)
+[![AI Generated](https://img.shields.io/badge/AI%20Generated-Claude-orange?logo=anthropic)](https://claude.ai/claude-code)
 
 Terraform provider for managing PostgreSQL role/database configuration parameters
 (`ALTER ROLE ... SET` / `ALTER DATABASE ... SET`), one parameter per resource.
