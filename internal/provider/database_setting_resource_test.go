@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
@@ -194,6 +195,61 @@ func TestAccDatabaseSetting_driftDetection(t *testing.T) {
 				Config:             config,
 				ExpectNonEmptyPlan: true,
 				PlanOnly:           true,
+			},
+		},
+	})
+}
+
+// TestAccDatabaseSetting_replaceOnDatabaseChange verifies that database's
+// RequiresReplace plan modifier actually forces a destroy+recreate (rather
+// than an in-place update), and that the old database's setting is reset
+// as part of that.
+func TestAccDatabaseSetting_replaceOnDatabaseChange(t *testing.T) {
+	testAccPreCheck(t)
+	db := testAccDB(t)
+
+	const databaseA = "pgconfig_test_db_replace_a"
+	const databaseB = "pgconfig_test_db_replace_b"
+	createTestDatabase(t, db, databaseA)
+	createTestDatabase(t, db, databaseB)
+
+	const resourceName = "pgconfig_database_setting.test"
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_database_setting" "test" {
+						database = %[1]q
+						name     = "statement_timeout"
+						value    = "5000"
+					}
+				`, databaseA),
+				Check: testAccCheckDatabaseSetting(t, db, databaseA, "statement_timeout", "statement_timeout=5000"),
+			},
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_database_setting" "test" {
+						database = %[1]q
+						name     = "statement_timeout"
+						value    = "5000"
+					}
+				`, databaseB),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionReplace),
+					},
+				},
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckDatabaseSetting(t, db, databaseB, "statement_timeout", "statement_timeout=5000"),
+					func(*terraform.State) error {
+						if got := testAccDatabaseSetting(t, db, databaseA, "statement_timeout"); got != "" {
+							return fmt.Errorf("statement_timeout on %s should have been reset after replace, but pg_db_role_setting has %q", databaseA, got)
+						}
+						return nil
+					},
+				),
 			},
 		},
 	})

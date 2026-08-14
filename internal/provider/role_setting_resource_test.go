@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/jackc/pgx/v5"
 )
@@ -394,6 +395,166 @@ func TestAccRoleSetting_driftDetection(t *testing.T) {
 				Config:             config,
 				ExpectNonEmptyPlan: true,
 				PlanOnly:           true,
+			},
+		},
+	})
+}
+
+// TestAccRoleSetting_replaceOnRoleChange verifies that role's
+// RequiresReplace plan modifier actually forces a destroy+recreate (rather
+// than an in-place update), and that the old role's setting is reset as
+// part of that.
+func TestAccRoleSetting_replaceOnRoleChange(t *testing.T) {
+	testAccPreCheck(t)
+	db := testAccDB(t)
+
+	const roleA = "pgconfig_test_role_replace_a"
+	const roleB = "pgconfig_test_role_replace_b"
+	createTestRole(t, db, roleA)
+	createTestRole(t, db, roleB)
+
+	const resourceName = "pgconfig_role_setting.test"
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_role_setting" "test" {
+						role  = %[1]q
+						name  = "statement_timeout"
+						value = "5000"
+					}
+				`, roleA),
+				Check: testAccCheckRoleSetting(t, db, roleA, "", "statement_timeout", "statement_timeout=5000"),
+			},
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_role_setting" "test" {
+						role  = %[1]q
+						name  = "statement_timeout"
+						value = "5000"
+					}
+				`, roleB),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionReplace),
+					},
+				},
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckRoleSetting(t, db, roleB, "", "statement_timeout", "statement_timeout=5000"),
+					func(*terraform.State) error {
+						if got := testAccRoleSetting(t, db, roleA, "", "statement_timeout"); got != "" {
+							return fmt.Errorf("statement_timeout on %s should have been reset after replace, but pg_db_role_setting has %q", roleA, got)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+// TestAccRoleSetting_replaceOnDatabaseChange is the same check for
+// database, going from unset (cluster-wide) to set (IN DATABASE).
+func TestAccRoleSetting_replaceOnDatabaseChange(t *testing.T) {
+	testAccPreCheck(t)
+	db := testAccDB(t)
+
+	const role = "pgconfig_test_role_replace_db"
+	const database = "pgconfig_test_db_replace"
+	createTestRole(t, db, role)
+	createTestDatabase(t, db, database)
+
+	const resourceName = "pgconfig_role_setting.test"
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_role_setting" "test" {
+						role  = %[1]q
+						name  = "statement_timeout"
+						value = "5000"
+					}
+				`, role),
+				Check: testAccCheckRoleSetting(t, db, role, "", "statement_timeout", "statement_timeout=5000"),
+			},
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_role_setting" "test" {
+						role     = %[1]q
+						database = %[2]q
+						name     = "statement_timeout"
+						value    = "5000"
+					}
+				`, role, database),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionReplace),
+					},
+				},
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckRoleSetting(t, db, role, database, "statement_timeout", "statement_timeout=5000"),
+					func(*terraform.State) error {
+						if got := testAccRoleSetting(t, db, role, "", "statement_timeout"); got != "" {
+							return fmt.Errorf("cluster-wide statement_timeout on %s should have been reset after replace, but pg_db_role_setting has %q", role, got)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+// TestAccRoleSetting_quoteToggle exercises an in-place Update (not a
+// replace: quote isn't a RequiresReplace attribute) that flips quote from
+// its default true to false on an existing resource.
+func TestAccRoleSetting_quoteToggle(t *testing.T) {
+	testAccPreCheck(t)
+	db := testAccDB(t)
+
+	const role = "pgconfig_test_role_quotetoggle"
+	createTestRole(t, db, role)
+
+	const resourceName = "pgconfig_role_setting.test"
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_role_setting" "test" {
+						role  = %[1]q
+						name  = "search_path"
+						value = "public"
+					}
+				`, role),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(resourceName, "quote", "true"),
+					testAccCheckRoleSetting(t, db, role, "", "search_path", "search_path=public"),
+				),
+			},
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_role_setting" "test" {
+						role  = %[1]q
+						name  = "search_path"
+						value = "public"
+						quote = false
+					}
+				`, role),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(resourceName, "quote", "false"),
+					testAccCheckRoleSetting(t, db, role, "", "search_path", "search_path=public"),
+				),
 			},
 		},
 	})
