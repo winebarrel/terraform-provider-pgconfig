@@ -24,6 +24,14 @@ func TestAccDatabaseSetting_basic(t *testing.T) {
 			if got := testAccDatabaseSetting(t, db, database, "statement_timeout"); got != "" {
 				return fmt.Errorf("statement_timeout should have been reset, but pg_db_role_setting has %q", got)
 			}
+
+			// statement_timeout was this database's only setting, so
+			// resetting it must remove the pg_db_role_setting row entirely,
+			// not just clear the entry within it.
+			if testAccDatabaseSettingRowExists(t, db, database) {
+				return fmt.Errorf("pg_db_role_setting row for %s should have been removed after its last setting was reset", database)
+			}
+
 			return nil
 		},
 		Steps: []resource.TestStep{
@@ -64,6 +72,62 @@ func TestAccDatabaseSetting_basic(t *testing.T) {
 				ImportStateId:                        database + "/statement_timeout",
 				ImportStateVerify:                    true,
 				ImportStateVerifyIdentifierAttribute: "name",
+			},
+		},
+	})
+}
+
+// TestAccDatabaseSetting_multipleKeys ensures two pgconfig_database_setting
+// resources on the same database don't clobber each other's entry in the
+// shared pg_db_role_setting.setconfig array. This is
+// TestAccRoleSetting_multipleKeys's database_setting counterpart.
+func TestAccDatabaseSetting_multipleKeys(t *testing.T) {
+	testAccPreCheck(t)
+	db := testAccDB(t)
+
+	const database = "pgconfig_test_db_multi"
+	createTestDatabase(t, db, database)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_database_setting" "a" {
+						database = %[1]q
+						name     = "statement_timeout"
+						value    = "5000"
+					}
+
+					resource "pgconfig_database_setting" "b" {
+						database = %[1]q
+						name     = "idle_in_transaction_session_timeout"
+						value    = "7000"
+					}
+				`, database),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckDatabaseSetting(t, db, database, "statement_timeout", "statement_timeout=5000"),
+					testAccCheckDatabaseSetting(t, db, database, "idle_in_transaction_session_timeout", "idle_in_transaction_session_timeout=7000"),
+				),
+			},
+			// Destroying resource "a" only must leave "b" intact.
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_database_setting" "b" {
+						database = %[1]q
+						name     = "idle_in_transaction_session_timeout"
+						value    = "7000"
+					}
+				`, database),
+				Check: resource.ComposeTestCheckFunc(
+					func(*terraform.State) error {
+						if got := testAccDatabaseSetting(t, db, database, "statement_timeout"); got != "" {
+							return fmt.Errorf("statement_timeout should have been reset, but pg_db_role_setting has %q", got)
+						}
+						return nil
+					},
+					testAccCheckDatabaseSetting(t, db, database, "idle_in_transaction_session_timeout", "idle_in_transaction_session_timeout=7000"),
+				),
 			},
 		},
 	})

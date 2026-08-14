@@ -51,6 +51,14 @@ func TestAccRoleSetting_basic(t *testing.T) {
 			if got := testAccRoleSetting(t, db, role, "", "statement_timeout"); got != "" {
 				return fmt.Errorf("statement_timeout should have been reset, but pg_db_role_setting has %q", got)
 			}
+
+			// statement_timeout was this role's only setting, so resetting it
+			// must remove the pg_db_role_setting row entirely, not just clear
+			// the entry within it.
+			if testAccRoleSettingRowExists(t, db, role, "") {
+				return fmt.Errorf("pg_db_role_setting row for %s should have been removed after its last setting was reset", role)
+			}
+
 			return nil
 		},
 		Steps: []resource.TestStep{
@@ -230,6 +238,95 @@ func TestAccRoleSetting_pgaudit(t *testing.T) {
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(resourceName, "value", "all"),
 					testAccCheckRoleSetting(t, db, role, "", "pgaudit.log", "pgaudit.log=all"),
+				),
+			},
+		},
+	})
+}
+
+// TestAccRoleSetting_unknownPlaceholderGUC exercises spec 4.5's documented
+// (not a bug) behavior: PostgreSQL accepts ALTER ROLE ... SET for any
+// dot-namespaced name as a "custom variable class" placeholder, even when
+// no extension registers it. docker-compose always loads pgaudit for this
+// test suite, so a name under "pgaudit." wouldn't actually exercise the
+// unloaded case; this uses a namespace that's guaranteed not to be loaded.
+func TestAccRoleSetting_unknownPlaceholderGUC(t *testing.T) {
+	testAccPreCheck(t)
+	db := testAccDB(t)
+
+	const role = "pgconfig_test_role_placeholder"
+	createTestRole(t, db, role)
+
+	const resourceName = "pgconfig_role_setting.test"
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_role_setting" "test" {
+						role  = %[1]q
+						name  = "definitely_not_a_loaded_extension.some_setting"
+						value = "anything"
+					}
+				`, role),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(resourceName, "value", "anything"),
+					testAccCheckRoleSetting(t, db, role, "", "definitely_not_a_loaded_extension.some_setting",
+						"definitely_not_a_loaded_extension.some_setting=anything"),
+				),
+			},
+		},
+	})
+}
+
+// TestAccRoleSetting_coexistsWithExternalSetting verifies that
+// pgconfig_role_setting doesn't clobber a setting on the same role that
+// was applied by some other tool (e.g. cyrilgdn/terraform-provider-
+// postgresql's postgresql_role "search_path" support) outside of pgconfig,
+// and that destroying the pgconfig-managed key leaves it untouched. This
+// simulates the external tool via a direct SQL statement rather than
+// depending on cyrilgdn's provider.
+func TestAccRoleSetting_coexistsWithExternalSetting(t *testing.T) {
+	testAccPreCheck(t)
+	db := testAccDB(t)
+
+	const role = "pgconfig_test_role_coexist"
+	createTestRole(t, db, role)
+
+	testAccExec(t, db, fmt.Sprintf("ALTER ROLE %s SET search_path = public", quoteTestIdentifier(role)))
+
+	const resourceName = "pgconfig_role_setting.test"
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+					resource "pgconfig_role_setting" "test" {
+						role  = %[1]q
+						name  = "pgaudit.log"
+						value = "all"
+					}
+				`, role),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(resourceName, "value", "all"),
+					testAccCheckRoleSetting(t, db, role, "", "pgaudit.log", "pgaudit.log=all"),
+					testAccCheckRoleSetting(t, db, role, "", "search_path", "search_path=public"),
+				),
+			},
+			// Destroying the pgconfig-managed key must leave the
+			// externally-managed search_path intact.
+			{
+				Config: `# no pgconfig_role_setting resources`,
+				Check: resource.ComposeTestCheckFunc(
+					func(*terraform.State) error {
+						if got := testAccRoleSetting(t, db, role, "", "pgaudit.log"); got != "" {
+							return fmt.Errorf("pgaudit.log should have been reset, but pg_db_role_setting has %q", got)
+						}
+						return nil
+					},
+					testAccCheckRoleSetting(t, db, role, "", "search_path", "search_path=public"),
 				),
 			},
 		},

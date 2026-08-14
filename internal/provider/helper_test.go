@@ -126,3 +126,57 @@ func queryMatchingSetting(t *testing.T, db *sql.DB, query string, args ...any) s
 
 	return entry
 }
+
+// testAccRoleSettingRowExists reports whether a pg_db_role_setting row
+// exists at all for (role, database), as opposed to testAccRoleSetting,
+// which only reports whether a particular entry is present within that
+// row. RESET removes the row entirely once its last entry is gone, rather
+// than leaving an empty array behind; this distinguishes that case.
+func testAccRoleSettingRowExists(t *testing.T, db *sql.DB, role, database string) bool {
+	t.Helper()
+
+	const query = `
+		SELECT 1
+		FROM pg_db_role_setting s
+		JOIN pg_roles r ON r.oid = s.setrole
+		WHERE r.rolname = $1
+		  AND s.setdatabase = CASE
+		        WHEN $2 = '' THEN 0
+		        ELSE (SELECT oid FROM pg_database WHERE datname = $2)
+		      END
+	`
+
+	return queryRowExists(t, db, query, role, database)
+}
+
+// testAccDatabaseSettingRowExists is testAccRoleSettingRowExists's
+// database_setting counterpart.
+func testAccDatabaseSettingRowExists(t *testing.T, db *sql.DB, database string) bool {
+	t.Helper()
+
+	const query = `
+		SELECT 1
+		FROM pg_db_role_setting s
+		JOIN pg_database d ON d.oid = s.setdatabase
+		WHERE d.datname = $1 AND s.setrole = 0
+	`
+
+	return queryRowExists(t, db, query, database)
+}
+
+func queryRowExists(t *testing.T, db *sql.DB, query string, args ...any) bool {
+	t.Helper()
+
+	var one int
+	err := db.QueryRow(query, args...).Scan(&one)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+
+	if err != nil {
+		t.Fatalf("failed to query pg_db_role_setting: %s", err)
+	}
+
+	return true
+}
