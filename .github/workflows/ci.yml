@@ -10,8 +10,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: golangci/golangci-lint-action@v9
+      - run: make vet
+      - run: make test
+
+  testacc:
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-version: [15, 16, 17, 18]
+    env:
+      POSTGRES_VERSION: ${{ matrix.postgres-version }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -21,14 +40,12 @@ jobs:
       - uses: hashicorp/setup-terraform@v4
         with:
           terraform_wrapper: false
-      - uses: golangci/golangci-lint-action@v9
-      - run: make vet
-      - run: make test
       - run: make docker-up
       - run: make testacc
       - if: always()
         run: make docker-down
-      - uses: codecov/codecov-action@v7
+      - if: matrix.postgres-version == 16
+        uses: codecov/codecov-action@v7
         with:
           files: ./coverage.txt
           token: ${{ secrets.CODECOV_TOKEN }}

@@ -1,7 +1,14 @@
 services:
   postgres:
-    build: ./docker/postgres
-    command: ["-c", "shared_preload_libraries=pgaudit"]
+    image: postgres:${POSTGRES_VERSION:-16}
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -e
+        apt-get update
+        apt-get install -y --no-install-recommends postgresql-$$PG_MAJOR-pgaudit
+        rm -rf /var/lib/apt/lists/*
+        exec docker-entrypoint.sh postgres -c shared_preload_libraries=pgaudit
     environment:
       POSTGRES_PASSWORD: postgres
     ports:
